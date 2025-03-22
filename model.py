@@ -21,6 +21,7 @@ class RerankerConfig(BaseModel):
     margin: float = Field(0.3, description="Margin for pairwise ranking loss")
     reranker_type: RerankerType = Field(RerankerType.POINTWISE, description="Reranking approach")
 
+    model_config = {"arbitrary_types_allowed": True}
 
 class CodeBERTReranker(nn.Module):
     """

@@ -5,39 +5,38 @@ import os
 import random
 import numpy as np
 import torch
-from torch.utils.data import (DataLoader, RandomSampler, SequentialSampler, TensorDataset)
+from torch.utils.data import (DataLoader, RandomSampler, SequentialSampler, 
+                             TensorDataset, ConcatDataset)
 from torch.utils.data.distributed import DistributedSampler
 from tensorboardX import SummaryWriter
 from tqdm import tqdm, trange
-from transformers import (WEIGHTS_NAME, AdamW, get_linear_schedule_with_warmup,
+from transformers import (WEIGHTS_NAME, get_linear_schedule_with_warmup,
                          RobertaConfig, RobertaTokenizer)
+from torch.optim import AdamW
+
 from pydantic import BaseModel, Field
-from typing import Optional, Literal
+from typing import Optional, Literal, List, Dict, Any, Union
+from pathlib import Path
 
 from model import CodeBERTReranker, RerankerType
-from utils import (
-    convert_examples_to_features, 
-    RerankerProcessor,
-    compute_reranker_metrics,
-    PointwiseFeature,
-    PairwiseFeature,
-    RerankerInputExample
-)
+from utils import compute_reranker_metrics
+from dataset_loader import DatasetLoaderConfig, load_datasets
 
 logger = logging.getLogger(__name__)
+
 
 class RerankerArgs(BaseModel):
     # Required parameters
     data_dir: str = Field(..., description="The input data directory")
+    language: str = Field(..., description="Programming language (python, java, etc.)")
     model_type: str = Field(..., description="Model type: roberta")
     model_name_or_path: str = Field(..., description="Path to pre-trained model or shortcut name")
     output_dir: str = Field(..., description="The output directory for model predictions and checkpoints")
     reranker_type: Literal["pointwise", "pairwise"] = Field(..., description="Reranker type: pointwise or pairwise")
 
     # Data parameters
-    train_file: str = Field("train.txt", description="The training data file name")
-    dev_file: str = Field("dev.txt", description="The development data file name")
     max_seq_length: int = Field(256, description="The maximum total input sequence length after tokenization")
+    cache_dir: Optional[str] = Field(None, description="Directory to cache processed features")
     
     # Training parameters
     do_train: bool = Field(False, description="Whether to run training")
@@ -71,15 +70,38 @@ class RerankerArgs(BaseModel):
     train_batch_size: Optional[int] = None
     eval_batch_size: Optional[int] = None
 
-def set_seed(args: RerankerArgs):
+    class Config:
+        arbitrary_types_allowed = True
+
+
+def set_seed(args: RerankerArgs) -> None:
+    """
+    Set random seeds for reproducibility.
+    
+    Args:
+        args: Training arguments
+    """
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     if args.n_gpu > 0:
         torch.cuda.manual_seed_all(args.seed)
 
-def train(args: RerankerArgs, train_dataset, model, tokenizer):
-    """ Train the model """
+
+def train(args: RerankerArgs, train_dataset: Union[TensorDataset, ConcatDataset], 
+          model: CodeBERTReranker, tokenizer: RobertaTokenizer) -> tuple:
+    """
+    Train the model.
+    
+    Args:
+        args: Training arguments
+        train_dataset: Training dataset
+        model: Model to train
+        tokenizer: Tokenizer
+        
+    Returns:
+        Tuple of (global_step, train_loss)
+    """
     if args.local_rank in [-1, 0]:
         tb_writer = SummaryWriter()
 
@@ -153,9 +175,9 @@ def train(args: RerankerArgs, train_dataset, model, tokenizer):
                           'token_type_ids': batch[2] if args.model_type in ['bert', 'xlnet'] else None,
                           'labels': batch[3]}
                 outputs = model(**inputs)
-                loss = outputs[0] if args.reranker_type == "pointwise" else outputs['loss']
+                loss = outputs[0] if isinstance(outputs, tuple) else outputs['loss']
             else:  # pairwise
-                # Unpack batch for pairwise inputs (query with positive and negative examples)
+                # Unpack batch for pairwise inputs
                 inputs = {
                     'pos_input_ids': batch[0],
                     'pos_attention_mask': batch[1],
@@ -192,7 +214,7 @@ def train(args: RerankerArgs, train_dataset, model, tokenizer):
 
                 if args.local_rank in [-1, 0] and args.save_steps > 0 and global_step % args.save_steps == 0:
                     # Save model checkpoint
-                    output_dir = os.path.join(args.output_dir, 'checkpoint-{}'.format(global_step))
+                    output_dir = os.path.join(args.output_dir, f'checkpoint-{global_step}')
                     if not os.path.exists(output_dir):
                         os.makedirs(output_dir)
                     
@@ -206,12 +228,12 @@ def train(args: RerankerArgs, train_dataset, model, tokenizer):
                     # Save tokenizer and training args
                     tokenizer.save_pretrained(output_dir)
                     torch.save(args.model_dump(), os.path.join(output_dir, 'training_args.bin'))
-                    logger.info("Saving model checkpoint to %s", output_dir)
+                    logger.info(f"Saving model checkpoint to {output_dir}")
                     
                     # Save optimizer and scheduler
                     torch.save(optimizer.state_dict(), os.path.join(output_dir, "optimizer.pt"))
                     torch.save(scheduler.state_dict(), os.path.join(output_dir, "scheduler.pt"))
-                    logger.info("Saving optimizer and scheduler states to %s", output_dir)
+                    logger.info(f"Saving optimizer and scheduler states to {output_dir}")
 
             if args.max_steps > 0 and global_step > args.max_steps:
                 epoch_iterator.close()
@@ -240,7 +262,7 @@ def train(args: RerankerArgs, train_dataset, model, tokenizer):
                 # Save tokenizer and training args
                 tokenizer.save_pretrained(output_dir)
                 torch.save(args.model_dump(), os.path.join(output_dir, 'training_args.bin'))
-                logger.info("Saving best model checkpoint with MRR: %s to %s", best_mrr, output_dir)
+                logger.info(f"Saving best model checkpoint with MRR: {best_mrr} to {output_dir}")
                 
         if args.max_steps > 0 and global_step > args.max_steps:
             train_iterator.close()
@@ -252,12 +274,35 @@ def train(args: RerankerArgs, train_dataset, model, tokenizer):
     return global_step, tr_loss / global_step
 
 
-def evaluate(args: RerankerArgs, model, tokenizer, prefix=""):
-    """Evaluate the model on the dev/test set"""
+def evaluate(args: RerankerArgs, model: CodeBERTReranker, 
+             tokenizer: RobertaTokenizer, prefix: str = "") -> Dict[str, float]:
+    """
+    Evaluate the model on the validation/test set.
+    
+    Args:
+        args: Training arguments
+        model: Model to evaluate
+        tokenizer: Tokenizer
+        prefix: String prefix for logging
+        
+    Returns:
+        Dictionary of evaluation metrics
+    """
     eval_output_dir = args.output_dir
     
     results = {}
-    eval_dataset = load_and_cache_examples(args, tokenizer, evaluate=True)
+    
+    # Load evaluation dataset
+    eval_config = DatasetLoaderConfig(
+        data_dir=args.data_dir,
+        language=args.language,
+        dataset_type="valid",  # Always use 'valid' for evaluation
+        max_seq_length=args.max_seq_length,
+        tokenizer=tokenizer,
+        reranker_type=args.reranker_type,
+        cache_dir=args.cache_dir
+    )
+    eval_dataset = load_datasets(eval_config)
 
     if not os.path.exists(eval_output_dir) and args.local_rank in [-1, 0]:
         os.makedirs(eval_output_dir)
@@ -267,9 +312,9 @@ def evaluate(args: RerankerArgs, model, tokenizer, prefix=""):
     eval_dataloader = DataLoader(eval_dataset, sampler=eval_sampler, batch_size=args.eval_batch_size)
 
     # Evaluate!
-    logger.info("***** Running evaluation {} *****".format(prefix))
-    logger.info("  Num examples = %d", len(eval_dataset))
-    logger.info("  Batch size = %d", args.eval_batch_size)
+    logger.info(f"***** Running evaluation {prefix} *****")
+    logger.info(f"  Num examples = {len(eval_dataset)}")
+    logger.info(f"  Batch size = {args.eval_batch_size}")
     
     all_scores = []
     all_labels = []
@@ -331,100 +376,40 @@ def evaluate(args: RerankerArgs, model, tokenizer, prefix=""):
         results[key] = value
     
     # Log results
-    output_eval_file = os.path.join(eval_output_dir, "eval_results_{}.txt".format(prefix))
+    output_eval_file = os.path.join(eval_output_dir, f"eval_results_{prefix}.txt")
     with open(output_eval_file, "w") as writer:
-        logger.info("***** Eval results {} *****".format(prefix))
+        logger.info(f"***** Eval results {prefix} *****")
         for key in sorted(results.keys()):
-            logger.info("  %s = %s", key, str(results[key]))
-            writer.write("%s = %s\n" % (key, str(results[key])))
+            logger.info(f"  {key} = {str(results[key])}")
+            writer.write(f"{key} = {str(results[key])}\n")
 
     return results
 
 
-def load_and_cache_examples(args: RerankerArgs, tokenizer, evaluate=False):
-    """Load and preprocess the reranking dataset"""
-    # Create processor
-    processor = RerankerProcessor()
-    
-    # Get examples
-    if evaluate:
-        examples = processor.get_dev_examples(args.data_dir, args.dev_file)
-    else:
-        examples = processor.get_train_examples(args.data_dir, args.train_file)
-    
-    # Convert to features
-    features = convert_examples_to_features(
-        examples,
-        args.max_seq_length,
-        tokenizer,
-        args.reranker_type,
-        cls_token=tokenizer.cls_token,
-        sep_token=tokenizer.sep_token,
-        pad_token=tokenizer.pad_token_id,
-        cls_token_segment_id=0,
-        pad_token_segment_id=0
-    )
-    
-    # Convert to tensor dataset
-    if args.reranker_type == "pointwise":
-        # Input IDs, attention mask, token type IDs, labels, (optional) query IDs
-        all_input_ids = torch.tensor([f.input_ids for f in features], dtype=torch.long)
-        all_attention_mask = torch.tensor([f.attention_mask for f in features], dtype=torch.long)
-        all_token_type_ids = torch.tensor([f.token_type_ids for f in features], dtype=torch.long)
-        all_labels = torch.tensor([f.label for f in features], dtype=torch.long)
-        
-        if hasattr(features[0], 'query_id'):
-            all_query_ids = torch.tensor([f.query_id for f in features], dtype=torch.long)
-            dataset = TensorDataset(all_input_ids, all_attention_mask, all_token_type_ids, all_labels, all_query_ids)
-        else:
-            dataset = TensorDataset(all_input_ids, all_attention_mask, all_token_type_ids, all_labels)
-            
-    else:  # pairwise
-        # Positive examples
-        all_pos_input_ids = torch.tensor([f.pos_input_ids for f in features], dtype=torch.long)
-        all_pos_attention_mask = torch.tensor([f.pos_attention_mask for f in features], dtype=torch.long)
-        all_pos_token_type_ids = torch.tensor([f.pos_token_type_ids for f in features], dtype=torch.long)
-        
-        # Negative examples
-        all_neg_input_ids = torch.tensor([f.neg_input_ids for f in features], dtype=torch.long)
-        all_neg_attention_mask = torch.tensor([f.neg_attention_mask for f in features], dtype=torch.long)
-        all_neg_token_type_ids = torch.tensor([f.neg_token_type_ids for f in features], dtype=torch.long)
-        
-        # Create dummy labels (all 1s since pos should be ranked higher than neg)
-        all_labels = torch.ones(len(features), dtype=torch.long)
-        
-        dataset = TensorDataset(
-            all_pos_input_ids, all_pos_attention_mask, all_pos_token_type_ids,
-            all_neg_input_ids, all_neg_attention_mask, all_neg_token_type_ids,
-            all_labels
-        )
-    
-    return dataset
-
-
 def main():
+    """Main execution function."""
     parser = argparse.ArgumentParser()
 
     # Required parameters
     parser.add_argument("--data_dir", default=None, type=str, required=True,
                         help="The input data directory")
+    parser.add_argument("--language", default="python", type=str, required=True,
+                        help="Programming language (python, java, etc.)")
     parser.add_argument("--model_type", default="roberta", type=str, required=True,
                         help="Model type: roberta")
     parser.add_argument("--model_name_or_path", default=None, type=str, required=True,
-                        help="Path to pre-trained model or shortcut name (e.g., 'microsoft/codebert-base')")
+                        help="Path to pre-trained model or shortcut name")
     parser.add_argument("--output_dir", default=None, type=str, required=True,
-                        help="The output directory where the model predictions and checkpoints will be written")
+                        help="The output directory for model predictions and checkpoints")
     parser.add_argument("--reranker_type", default="pointwise", type=str, required=True,
                         choices=["pointwise", "pairwise"],
                         help="Reranker type: pointwise or pairwise")
 
     # Data parameters
-    parser.add_argument("--train_file", default="train.txt", type=str,
-                        help="The training data file name")
-    parser.add_argument("--dev_file", default="dev.txt", type=str,
-                        help="The development data file name")
     parser.add_argument("--max_seq_length", default=256, type=int,
                         help="The maximum total input sequence length after tokenization")
+    parser.add_argument("--cache_dir", default=None, type=str,
+                        help="Directory to cache processed features")
     
     # Training parameters
     parser.add_argument("--do_train", action="store_true",
@@ -468,9 +453,9 @@ def main():
     parser.add_argument("--local_rank", type=int, default=-1,
                         help="For distributed training: local_rank")
     parser.add_argument("--fp16", action="store_true",
-                        help="Whether to use 16-bit (mixed) precision (through NVIDIA apex) instead of 32-bit")
+                        help="Whether to use 16-bit (mixed) precision")
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1,
-                        help="Number of updates steps to accumulate before performing a backward/update pass")
+                        help="Number of updates steps to accumulate before performing update")
     
     parsed_args = parser.parse_args()
     
@@ -480,8 +465,14 @@ def main():
 
     # Setup CUDA, GPU & distributed training
     if args.local_rank == -1 or args.no_cuda:
-        device = torch.device("cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu")
-        args.n_gpu = torch.cuda.device_count()
+        if torch.cuda.is_available():
+            device = torch.device("cuda")
+            args.n_gpu = torch.cuda.device_count()
+        elif torch.mps.is_available():
+            device = torch.device("mps")
+            args.n_gpu = torch.mps.device_count()
+        else:
+            raise ValueError("No GPU available, please run with --no_cuda")
     else:  # Initializes the distributed backend
         torch.cuda.set_device(args.local_rank)
         device = torch.device("cuda", args.local_rank)
@@ -491,13 +482,13 @@ def main():
 
     # Setup logging
     logging.basicConfig(
-        format="%(asctime)s - %(levelname)s - %(name)s -   %(message)s",
+        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
         datefmt="%m/%d/%Y %H:%M:%S",
         level=logging.INFO if args.local_rank in [-1, 0] else logging.WARN,
     )
     logger.warning(
-        "Process rank: %s, device: %s, n_gpu: %s, distributed training: %s, 16-bits training: %s",
-        args.local_rank, device, args.n_gpu, bool(args.local_rank != -1), args.fp16
+        f"Process rank: {args.local_rank}, device: {device}, n_gpu: {args.n_gpu}, "
+        f"distributed training: {bool(args.local_rank != -1)}, 16-bits training: {args.fp16}"
     )
 
     # Set seed
@@ -531,21 +522,32 @@ def main():
         torch.distributed.barrier()
 
     model.to(args.device)
-    logger.info("Training/evaluation parameters %s", args)
+    logger.info(f"Training/evaluation parameters {args}")
+
+    # Create output dir if it doesn't exist
+    os.makedirs(args.output_dir, exist_ok=True)
 
     # Training
     if args.do_train:
-        train_dataset = load_and_cache_examples(args, tokenizer, evaluate=False)
+        # Load training dataset
+        train_config = DatasetLoaderConfig(
+            data_dir=args.data_dir,
+            language=args.language,
+            dataset_type="train",
+            max_seq_length=args.max_seq_length,
+            tokenizer=tokenizer,
+            reranker_type=args.reranker_type,
+            cache_dir=args.cache_dir
+        )
+        train_dataset = load_datasets(train_config)
+        
+        # Train the model
         global_step, tr_loss = train(args, train_dataset, model, tokenizer)
-        logger.info(" global_step = %s, average loss = %s", global_step, tr_loss)
+        logger.info(f" global_step = {global_step}, average loss = {tr_loss}")
 
         # Save model
         if args.local_rank == -1 or torch.distributed.get_rank() == 0:
-            # Create output directory if needed
-            if not os.path.exists(args.output_dir):
-                os.makedirs(args.output_dir)
-
-            logger.info("Saving model checkpoint to %s", args.output_dir)
+            logger.info(f"Saving model checkpoint to {args.output_dir}")
             model_to_save = model.module if hasattr(model, "module") else model
             if hasattr(model_to_save, 'save_pretrained'):
                 model_to_save.save_pretrained(args.output_dir)
@@ -560,7 +562,7 @@ def main():
     results = {}
     if args.do_eval and args.local_rank in [-1, 0]:
         # Load a trained model and evaluate
-        logger.info("Evaluate the following checkpoint: %s", args.output_dir)
+        logger.info(f"Evaluate the following checkpoint: {args.output_dir}")
         
         model = CodeBERTReranker(
             args.output_dir,
@@ -573,6 +575,7 @@ def main():
         results.update(result)
 
     return results
+
 
 if __name__ == "__main__":
     main()
