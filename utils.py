@@ -163,77 +163,122 @@ class RerankerProcessor:
                 )
         return examples
 
-def convert_examples_to_features(examples: List[RerankerInputExample], 
-                                max_length: int,
-                                tokenizer,
-                                reranker_type: str = "pointwise",
-                                cls_token: str = "[CLS]",
-                                sep_token: str = "[SEP]",
-                                pad_token: int = 0,
-                                cls_token_segment_id: int = 0,
-                                pad_token_segment_id: int = 0) -> List[Union[PointwiseFeature, PairwiseFeature]]:
+def convert_examples_to_features_batch(
+    examples: List[RerankerInputExample], 
+    max_length: int,
+    tokenizer,
+    reranker_type: str = "pointwise",
+    cls_token: str = None,
+    sep_token: str = None,
+    pad_token: int = None,
+    cls_token_segment_id: int = 0,
+    pad_token_segment_id: int = 0,
+    batch_size: int = 256
+) -> List[Union[PointwiseFeature, PairwiseFeature]]:
     """
-    Convert examples to features compatible with the model.
+    Convert examples to features compatible with the model using batch processing.
     
     For pointwise reranking: each example is a (query, code) pair with a relevance label
     For pairwise reranking: examples are grouped by query_id, and each group generates 
                             pairs of (relevant, irrelevant) code snippets
+                            
+    Args:
+        examples: List of examples to convert
+        max_length: Maximum sequence length
+        tokenizer: Tokenizer to use
+        reranker_type: Type of reranking (pointwise or pairwise)
+        cls_token: Classification token (defaults to tokenizer.cls_token)
+        sep_token: Separator token (defaults to tokenizer.sep_token)
+        pad_token: Padding token ID (defaults to tokenizer.pad_token_id)
+        cls_token_segment_id: Segment ID for classification token
+        pad_token_segment_id: Segment ID for padding tokens
+        batch_size: Size of batches for tokenization
+        
+    Returns:
+        List of features (either PointwiseFeature or PairwiseFeature)
     """
     features = []
     
+    # Use tokenizer defaults if not specified
+    cls_token = cls_token or tokenizer.cls_token
+    sep_token = sep_token or tokenizer.sep_token
+    pad_token = pad_token if pad_token is not None else tokenizer.pad_token_id
+    
+    # For logging progress
+    total_examples = len(examples)
+    
     if reranker_type == "pointwise":
-        # Process each example independently
-        for (ex_index, example) in enumerate(examples):
-            if ex_index % 10000 == 0:
-                logger.info(f"Writing pointwise example {ex_index} of {len(examples)}")
+        # Process examples in batches
+        for i in range(0, len(examples), batch_size):
+            batch_examples = examples[i:i + batch_size]
             
-            # Tokenize query and code
-            tokens_a = tokenizer.tokenize(example.query)
-            tokens_b = tokenizer.tokenize(example.code)
+            # Log progress
+            if i % 10000 == 0:
+                logger.info(f"Writing pointwise examples {i} to {min(i + batch_size, total_examples)} of {total_examples}")
             
-            # Account for [CLS], [SEP], [SEP] with "- 3"
-            max_tokens = max_length - 3
+            # Use the fast tokenizer's batch capability while preserving the original logic
+            batch_input_ids = []
+            batch_attention_masks = []
+            batch_token_type_ids = []
+            batch_labels = []
+            batch_query_ids = []
             
-            # Truncate or pad sequences
-            if len(tokens_a) + len(tokens_b) > max_tokens:
-                # Prioritize code by allocating more tokens to it
-                # Allow at least 64 tokens for the query
-                query_max = min(64, int(max_tokens * 0.2))
-                code_max = max_tokens - min(len(tokens_a), query_max)
+            for example in batch_examples:
+                # Tokenize query and code separately to apply proper truncation logic
+                tokens_a = tokenizer.tokenize(example.query)
+                tokens_b = tokenizer.tokenize(example.code)
                 
-                if len(tokens_a) > query_max:
-                    tokens_a = tokens_a[:query_max]
-                if len(tokens_b) > code_max:
-                    tokens_b = tokens_b[:code_max]
+                # Account for [CLS], [SEP], [SEP] with "- 3"
+                max_tokens = max_length - 3
+                
+                # Truncate or pad sequences
+                if len(tokens_a) + len(tokens_b) > max_tokens:
+                    # Prioritize code by allocating more tokens to it
+                    # Allow at least 64 tokens for the query
+                    query_max = min(64, int(max_tokens * 0.2))
+                    code_max = max_tokens - min(len(tokens_a), query_max)
+                    
+                    if len(tokens_a) > query_max:
+                        tokens_a = tokens_a[:query_max]
+                    if len(tokens_b) > code_max:
+                        tokens_b = tokens_b[:code_max]
+                
+                # Build token sequence
+                tokens = [cls_token] + tokens_a + [sep_token] + tokens_b + [sep_token]
+                token_type_ids = [cls_token_segment_id] + [0] * (len(tokens_a) + 1) + [1] * (len(tokens_b) + 1)
+                
+                # Convert tokens to IDs
+                input_ids = tokenizer.convert_tokens_to_ids(tokens)
+                attention_mask = [1] * len(input_ids)
+                
+                # Pad sequences
+                padding_length = max_length - len(input_ids)
+                input_ids = input_ids + [pad_token] * padding_length
+                attention_mask = attention_mask + [0] * padding_length
+                token_type_ids = token_type_ids + [pad_token_segment_id] * padding_length
+                
+                # Verify lengths
+                assert len(input_ids) == max_length
+                assert len(attention_mask) == max_length
+                assert len(token_type_ids) == max_length
+                
+                batch_input_ids.append(input_ids)
+                batch_attention_masks.append(attention_mask)
+                batch_token_type_ids.append(token_type_ids)
+                batch_labels.append(example.label)
+                batch_query_ids.append(example.query_id)
             
-            # Build token sequence
-            tokens = [cls_token] + tokens_a + [sep_token] + tokens_b + [sep_token]
-            token_type_ids = [cls_token_segment_id] + [0] * (len(tokens_a) + 1) + [1] * (len(tokens_b) + 1)
-            
-            # Convert tokens to IDs
-            input_ids = tokenizer.convert_tokens_to_ids(tokens)
-            attention_mask = [1] * len(input_ids)
-            
-            # Pad sequences
-            padding_length = max_length - len(input_ids)
-            input_ids = input_ids + [pad_token] * padding_length
-            attention_mask = attention_mask + [0] * padding_length
-            token_type_ids = token_type_ids + [pad_token_segment_id] * padding_length
-            
-            assert len(input_ids) == max_length
-            assert len(attention_mask) == max_length
-            assert len(token_type_ids) == max_length
-            
-            # Create feature
-            features.append(
-                PointwiseFeature(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    token_type_ids=token_type_ids,
-                    label=example.label,
-                    query_id=example.query_id
+            # Add all examples from this batch to features
+            for j in range(len(batch_examples)):
+                features.append(
+                    PointwiseFeature(
+                        input_ids=batch_input_ids[j],
+                        attention_mask=batch_attention_masks[j],
+                        token_type_ids=batch_token_type_ids[j],
+                        label=batch_labels[j],
+                        query_id=batch_query_ids[j]
+                    )
                 )
-            )
     
     else:  # pairwise reranking
         # Group examples by query_id
@@ -243,8 +288,8 @@ def convert_examples_to_features(examples: List[RerankerInputExample],
                 query_to_examples[example.query_id] = []
             query_to_examples[example.query_id].append(example)
         
-        pair_count = 0
-        # For each query, create positive-negative pairs
+        # Generate pairs
+        pairs = []
         for query_id, query_examples in query_to_examples.items():
             positive_examples = [ex for ex in query_examples if ex.label == 1]
             negative_examples = [ex for ex in query_examples if ex.label == 0]
@@ -256,86 +301,114 @@ def convert_examples_to_features(examples: List[RerankerInputExample],
             # Create pairs (each positive example paired with each negative example)
             for pos_example in positive_examples:
                 for neg_example in negative_examples:
-                    pair_count += 1
-                    if pair_count % 10000 == 0:
-                        logger.info(f"Writing pairwise example {pair_count}")
+                    pairs.append((pos_example, neg_example, query_id))
+        
+        pair_count = 0
+        # Process pairs in batches
+        for i in range(0, len(pairs), batch_size):
+            batch_pairs = pairs[i:i + batch_size]
+            
+            # Log progress
+            pair_count += len(batch_pairs)
+            if pair_count % 10000 < batch_size:
+                logger.info(f"Writing pairwise example {pair_count}")
+            
+            # Prepare data structures for this batch
+            batch_pos_input_ids = []
+            batch_pos_attention_masks = []
+            batch_pos_token_type_ids = []
+            batch_neg_input_ids = []
+            batch_neg_attention_masks = []
+            batch_neg_token_type_ids = []
+            batch_query_ids = []
+            
+            for pos_example, neg_example, query_id in batch_pairs:
+                # Process positive example
+                pos_tokens_query = tokenizer.tokenize(pos_example.query)
+                pos_tokens_code = tokenizer.tokenize(pos_example.code)
+                
+                # Process negative example (same query, different code)
+                neg_tokens_query = tokenizer.tokenize(neg_example.query)
+                neg_tokens_code = tokenizer.tokenize(neg_example.code)
+                
+                # Account for [CLS], [SEP], [SEP] with "- 3" for both examples
+                max_tokens = max_length - 3
+                
+                # Truncate positive example
+                if len(pos_tokens_query) + len(pos_tokens_code) > max_tokens:
+                    query_max = min(64, int(max_tokens * 0.2))
+                    code_max = max_tokens - min(len(pos_tokens_query), query_max)
                     
-                    # Process positive example
-                    pos_tokens_query = tokenizer.tokenize(pos_example.query)
-                    pos_tokens_code = tokenizer.tokenize(pos_example.code)
+                    if len(pos_tokens_query) > query_max:
+                        pos_tokens_query = pos_tokens_query[:query_max]
+                    if len(pos_tokens_code) > code_max:
+                        pos_tokens_code = pos_tokens_code[:code_max]
+                
+                # Truncate negative example
+                if len(neg_tokens_query) + len(neg_tokens_code) > max_tokens:
+                    query_max = min(64, int(max_tokens * 0.2))
+                    code_max = max_tokens - min(len(neg_tokens_query), query_max)
                     
-                    # Process negative example (same query, different code)
-                    neg_tokens_query = tokenizer.tokenize(neg_example.query)
-                    neg_tokens_code = tokenizer.tokenize(neg_example.code)
-                    
-                    # Account for [CLS], [SEP], [SEP] with "- 3" for both examples
-                    max_tokens = max_length - 3
-                    
-                    # Truncate positive example
-                    if len(pos_tokens_query) + len(pos_tokens_code) > max_tokens:
-                        query_max = min(64, int(max_tokens * 0.2))
-                        code_max = max_tokens - min(len(pos_tokens_query), query_max)
-                        
-                        if len(pos_tokens_query) > query_max:
-                            pos_tokens_query = pos_tokens_query[:query_max]
-                        if len(pos_tokens_code) > code_max:
-                            pos_tokens_code = pos_tokens_code[:code_max]
-                    
-                    # Truncate negative example
-                    if len(neg_tokens_query) + len(neg_tokens_code) > max_tokens:
-                        query_max = min(64, int(max_tokens * 0.2))
-                        code_max = max_tokens - min(len(neg_tokens_query), query_max)
-                        
-                        if len(neg_tokens_query) > query_max:
-                            neg_tokens_query = neg_tokens_query[:query_max]
-                        if len(neg_tokens_code) > code_max:
-                            neg_tokens_code = neg_tokens_code[:code_max]
-                    
-                    # Build token sequences
-                    pos_tokens = [cls_token] + pos_tokens_query + [sep_token] + pos_tokens_code + [sep_token]
-                    pos_token_type_ids = [cls_token_segment_id] + [0] * (len(pos_tokens_query) + 1) + [1] * (len(pos_tokens_code) + 1)
-                    
-                    neg_tokens = [cls_token] + neg_tokens_query + [sep_token] + neg_tokens_code + [sep_token]
-                    neg_token_type_ids = [cls_token_segment_id] + [0] * (len(neg_tokens_query) + 1) + [1] * (len(neg_tokens_code) + 1)
-                    
-                    # Convert tokens to IDs
-                    pos_input_ids = tokenizer.convert_tokens_to_ids(pos_tokens)
-                    pos_attention_mask = [1] * len(pos_input_ids)
-                    
-                    neg_input_ids = tokenizer.convert_tokens_to_ids(neg_tokens)
-                    neg_attention_mask = [1] * len(neg_input_ids)
-                    
-                    # Pad sequences
-                    pos_padding_length = max_length - len(pos_input_ids)
-                    pos_input_ids = pos_input_ids + [pad_token] * pos_padding_length
-                    pos_attention_mask = pos_attention_mask + [0] * pos_padding_length
-                    pos_token_type_ids = pos_token_type_ids + [pad_token_segment_id] * pos_padding_length
-                    
-                    neg_padding_length = max_length - len(neg_input_ids)
-                    neg_input_ids = neg_input_ids + [pad_token] * neg_padding_length
-                    neg_attention_mask = neg_attention_mask + [0] * neg_padding_length
-                    neg_token_type_ids = neg_token_type_ids + [pad_token_segment_id] * neg_padding_length
-                    
-                    assert len(pos_input_ids) == max_length
-                    assert len(pos_attention_mask) == max_length
-                    assert len(pos_token_type_ids) == max_length
-                    
-                    assert len(neg_input_ids) == max_length
-                    assert len(neg_attention_mask) == max_length
-                    assert len(neg_token_type_ids) == max_length
-                    
-                    # Create pairwise feature
-                    features.append(
-                        PairwiseFeature(
-                            pos_input_ids=pos_input_ids,
-                            pos_attention_mask=pos_attention_mask,
-                            pos_token_type_ids=pos_token_type_ids,
-                            neg_input_ids=neg_input_ids,
-                            neg_attention_mask=neg_attention_mask,
-                            neg_token_type_ids=neg_token_type_ids,
-                            query_id=query_id
-                        )
+                    if len(neg_tokens_query) > query_max:
+                        neg_tokens_query = neg_tokens_query[:query_max]
+                    if len(neg_tokens_code) > code_max:
+                        neg_tokens_code = neg_tokens_code[:code_max]
+                
+                # Build token sequences
+                pos_tokens = [cls_token] + pos_tokens_query + [sep_token] + pos_tokens_code + [sep_token]
+                pos_token_type_ids = [cls_token_segment_id] + [0] * (len(pos_tokens_query) + 1) + [1] * (len(pos_tokens_code) + 1)
+                
+                neg_tokens = [cls_token] + neg_tokens_query + [sep_token] + neg_tokens_code + [sep_token]
+                neg_token_type_ids = [cls_token_segment_id] + [0] * (len(neg_tokens_query) + 1) + [1] * (len(neg_tokens_code) + 1)
+                
+                # Convert tokens to IDs
+                pos_input_ids = tokenizer.convert_tokens_to_ids(pos_tokens)
+                pos_attention_mask = [1] * len(pos_input_ids)
+                
+                neg_input_ids = tokenizer.convert_tokens_to_ids(neg_tokens)
+                neg_attention_mask = [1] * len(neg_input_ids)
+                
+                # Pad sequences
+                pos_padding_length = max_length - len(pos_input_ids)
+                pos_input_ids = pos_input_ids + [pad_token] * pos_padding_length
+                pos_attention_mask = pos_attention_mask + [0] * pos_padding_length
+                pos_token_type_ids = pos_token_type_ids + [pad_token_segment_id] * pos_padding_length
+                
+                neg_padding_length = max_length - len(neg_input_ids)
+                neg_input_ids = neg_input_ids + [pad_token] * neg_padding_length
+                neg_attention_mask = neg_attention_mask + [0] * neg_padding_length
+                neg_token_type_ids = neg_token_type_ids + [pad_token_segment_id] * neg_padding_length
+                
+                # Verify lengths
+                assert len(pos_input_ids) == max_length
+                assert len(pos_attention_mask) == max_length
+                assert len(pos_token_type_ids) == max_length
+                
+                assert len(neg_input_ids) == max_length
+                assert len(neg_attention_mask) == max_length
+                assert len(neg_token_type_ids) == max_length
+                
+                batch_pos_input_ids.append(pos_input_ids)
+                batch_pos_attention_masks.append(pos_attention_mask)
+                batch_pos_token_type_ids.append(pos_token_type_ids)
+                batch_neg_input_ids.append(neg_input_ids)
+                batch_neg_attention_masks.append(neg_attention_mask)
+                batch_neg_token_type_ids.append(neg_token_type_ids)
+                batch_query_ids.append(query_id)
+            
+            # Add all pairs from this batch to features
+            for j in range(len(batch_pairs)):
+                features.append(
+                    PairwiseFeature(
+                        pos_input_ids=batch_pos_input_ids[j],
+                        pos_attention_mask=batch_pos_attention_masks[j],
+                        pos_token_type_ids=batch_pos_token_type_ids[j],
+                        neg_input_ids=batch_neg_input_ids[j],
+                        neg_attention_mask=batch_neg_attention_masks[j],
+                        neg_token_type_ids=batch_neg_token_type_ids[j],
+                        query_id=batch_query_ids[j]
                     )
+                )
     
     return features
 

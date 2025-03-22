@@ -11,7 +11,7 @@ from torch.utils.data.distributed import DistributedSampler
 from tensorboardX import SummaryWriter
 from tqdm import tqdm, trange
 from transformers import (WEIGHTS_NAME, get_linear_schedule_with_warmup,
-                         RobertaConfig, RobertaTokenizer)
+                         RobertaConfig, RobertaTokenizer, AutoTokenizer)
 from torch.optim import AdamW
 
 from pydantic import BaseModel, Field
@@ -511,7 +511,7 @@ def main():
     )
     
     # Create tokenizer
-    tokenizer = RobertaTokenizer.from_pretrained(args.model_name_or_path)
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, use_fast=True)
     
     # Create model
     model = CodeBERTReranker(

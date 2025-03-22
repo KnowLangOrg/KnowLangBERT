@@ -12,7 +12,7 @@ from tqdm import tqdm
 from utils import (
     RerankerInputExample,
     RerankerProcessor,
-    convert_examples_to_features,
+    convert_examples_to_features_batch,
     PointwiseFeature,
     PairwiseFeature
 )
@@ -146,7 +146,7 @@ def load_and_cache_file(
     )
     
     logger.info(f"Converting {len(examples)} examples to features")
-    features = convert_examples_to_features(
+    features = convert_examples_to_features_batch(
         examples,
         config.max_seq_length,
         config.tokenizer,
@@ -216,35 +216,13 @@ def load_datasets(config: DatasetLoaderConfig) -> Union[TensorDataset, ConcatDat
     
     # Process each file in parallel if multiple files exist
     datasets = []
+
+    from torch import serialization
+    serialization.add_safe_globals([TensorDataset])
     
-    if len(data_files) > 1 and config.num_workers > 1:
-        logger.info(f"Loading datasets in parallel with {config.num_workers} workers")
-        with concurrent.futures.ThreadPoolExecutor(max_workers=config.num_workers) as executor:
-            # Create a dict mapping futures to their file description for better progress reporting
-            future_to_file = {
-                executor.submit(load_and_cache_file, config, data_file): data_file 
-                for data_file in data_files
-            }
-            
-            # Process results as they complete
-            for future in tqdm(
-                concurrent.futures.as_completed(future_to_file), 
-                total=len(data_files),
-                desc=f"Loading {config.dataset_type} data"
-            ):
-                data_file = future_to_file[future]
-                try:
-                    dataset = future.result()
-                    datasets.append(dataset)
-                    logger.info(f"Successfully loaded dataset from {data_file}")
-                except Exception as e:
-                    logger.error(f"Error processing {data_file}: {str(e)}")
-                    raise
-    else:
-        # Serial processing for single file or when only one worker is specified
-        for data_file in tqdm(data_files, desc=f"Loading {config.dataset_type} data"):
-            dataset = load_and_cache_file(config, data_file)
-            datasets.append(dataset)
+    for data_file in tqdm(data_files, desc=f"Loading {config.dataset_type} data"):
+        dataset = load_and_cache_file(config, data_file)
+        datasets.append(dataset)
     
     # Combine all datasets
     if len(datasets) == 1:
