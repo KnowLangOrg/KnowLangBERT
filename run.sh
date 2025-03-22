@@ -52,6 +52,7 @@ train_model() {
       --reranker_type "${RERANKER_TYPE}" \
       --max_seq_length 256 \
       --cache_dir "${CACHE_DIR}" \
+      --num_workers "${NUM_WORKERS}" \
       --per_gpu_train_batch_size "${BATCH_SIZE}" \
       --per_gpu_eval_batch_size "${BATCH_SIZE}" \
       --learning_rate "${LEARNING_RATE}" \

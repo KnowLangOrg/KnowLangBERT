@@ -37,6 +37,7 @@ class RerankerArgs(BaseModel):
     # Data parameters
     max_seq_length: int = Field(256, description="The maximum total input sequence length after tokenization")
     cache_dir: Optional[str] = Field(None, description="Directory to cache processed features")
+    num_workers: int = Field(4, description="Number of worker threads for parallel data loading")
     
     # Training parameters
     do_train: bool = Field(False, description="Whether to run training")
@@ -300,7 +301,8 @@ def evaluate(args: RerankerArgs, model: CodeBERTReranker,
         max_seq_length=args.max_seq_length,
         tokenizer=tokenizer,
         reranker_type=args.reranker_type,
-        cache_dir=args.cache_dir
+        cache_dir=args.cache_dir,
+        num_workers=args.num_workers
     )
     eval_dataset = load_datasets(eval_config)
 
@@ -410,6 +412,8 @@ def main():
                         help="The maximum total input sequence length after tokenization")
     parser.add_argument("--cache_dir", default=None, type=str,
                         help="Directory to cache processed features")
+    parser.add_argument("--num_workers", default=4, type=int,
+                        help="Number of worker threads for parallel data loading")
     
     # Training parameters
     parser.add_argument("--do_train", action="store_true",
@@ -537,7 +541,8 @@ def main():
             max_seq_length=args.max_seq_length,
             tokenizer=tokenizer,
             reranker_type=args.reranker_type,
-            cache_dir=args.cache_dir
+            cache_dir=args.cache_dir,
+            num_workers=args.num_workers
         )
         train_dataset = load_datasets(train_config)
         

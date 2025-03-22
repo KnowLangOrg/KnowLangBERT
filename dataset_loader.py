@@ -3,6 +3,7 @@ import glob
 import logging
 from pathlib import Path
 from typing import List, Optional, Dict, Union, Any, Tuple
+import concurrent.futures
 
 import torch
 from torch.utils.data import TensorDataset, ConcatDataset
@@ -31,7 +32,8 @@ class DatasetLoaderConfig:
         reranker_type: str = "pointwise",
         shard_id: Optional[int] = None,
         num_shards: Optional[int] = None,
-        cache_dir: Optional[str] = None
+        cache_dir: Optional[str] = None,
+        num_workers: int = 4
     ):
         """
         Initialize dataset loader configuration.
@@ -46,6 +48,7 @@ class DatasetLoaderConfig:
             shard_id: Shard ID for distributed training (optional)
             num_shards: Total number of shards for distributed training (optional)
             cache_dir: Directory to cache processed features (optional)
+            num_workers: Number of worker threads for parallel processing
         """
         self.data_dir = data_dir
         self.language = language
@@ -56,6 +59,7 @@ class DatasetLoaderConfig:
         self.shard_id = shard_id
         self.num_shards = num_shards
         self.cache_dir = cache_dir
+        self.num_workers = num_workers
         
         # Derived paths
         self.dataset_path = Path(data_dir) / language / dataset_type
@@ -210,11 +214,37 @@ def load_datasets(config: DatasetLoaderConfig) -> Union[TensorDataset, ConcatDat
     data_files = get_dataset_files(config)
     logger.info(f"Found {len(data_files)} data files for {config.language}/{config.dataset_type}")
     
-    # Process each file
+    # Process each file in parallel if multiple files exist
     datasets = []
-    for data_file in tqdm(data_files, desc=f"Loading {config.dataset_type} data"):
-        dataset = load_and_cache_file(config, data_file)
-        datasets.append(dataset)
+    
+    if len(data_files) > 1 and config.num_workers > 1:
+        logger.info(f"Loading datasets in parallel with {config.num_workers} workers")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=config.num_workers) as executor:
+            # Create a dict mapping futures to their file description for better progress reporting
+            future_to_file = {
+                executor.submit(load_and_cache_file, config, data_file): data_file 
+                for data_file in data_files
+            }
+            
+            # Process results as they complete
+            for future in tqdm(
+                concurrent.futures.as_completed(future_to_file), 
+                total=len(data_files),
+                desc=f"Loading {config.dataset_type} data"
+            ):
+                data_file = future_to_file[future]
+                try:
+                    dataset = future.result()
+                    datasets.append(dataset)
+                    logger.info(f"Successfully loaded dataset from {data_file}")
+                except Exception as e:
+                    logger.error(f"Error processing {data_file}: {str(e)}")
+                    raise
+    else:
+        # Serial processing for single file or when only one worker is specified
+        for data_file in tqdm(data_files, desc=f"Loading {config.dataset_type} data"):
+            dataset = load_and_cache_file(config, data_file)
+            datasets.append(dataset)
     
     # Combine all datasets
     if len(datasets) == 1:
