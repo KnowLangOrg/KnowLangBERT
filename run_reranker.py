@@ -208,6 +208,10 @@ def train(args: RerankerArgs, train_dataset: Union[TensorDataset, ConcatDataset]
                 global_step += 1
 
                 if args.local_rank in [-1, 0] and args.logging_steps > 0 and global_step % args.logging_steps == 0:
+                    # Log to console
+                    avg_loss = (tr_loss - logging_loss) / args.logging_steps
+                    logger.info(f"Epoch {_+1}, step {global_step}, loss {avg_loss:.5f}")
+
                     # Log metrics
                     tb_writer.add_scalar('lr', scheduler.get_lr()[0], global_step)
                     tb_writer.add_scalar('loss', (tr_loss - logging_loss) / args.logging_steps, global_step)
