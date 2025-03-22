@@ -1,6 +1,3 @@
-# -*- coding: utf-8 -*-
-# Fine-tuning script for CodeBERT Reranker
-
 import argparse
 import glob
 import logging
@@ -12,13 +9,18 @@ from torch.utils.data import (DataLoader, RandomSampler, SequentialSampler, Tens
 from torch.utils.data.distributed import DistributedSampler
 from tensorboardX import SummaryWriter
 from tqdm import tqdm, trange
-
 from transformers import (WEIGHTS_NAME, AdamW, get_linear_schedule_with_warmup,
-                          RobertaConfig, RobertaTokenizer)
+                         RobertaConfig, RobertaTokenizer)
 
-from model import CodeBERTReranker
-from utils import (convert_examples_to_features, RerankerProcessor,
-                  compute_reranker_metrics)
+from model import CodeBERTReranker, RerankerType
+from utils import (
+    convert_examples_to_features, 
+    RerankerProcessor,
+    compute_reranker_metrics,
+    PointwiseFeature,
+    PairwiseFeature,
+    RerankerInputExample
+)
 
 logger = logging.getLogger(__name__)
 

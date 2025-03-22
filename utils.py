@@ -1,37 +1,42 @@
-# -*- coding: utf-8 -*-
-# Utility functions for CodeBERT Reranker
-
 import csv
 import logging
 import os
 from io import open
+from typing import List, Dict, Optional, Tuple, Any, Union, Sequence
+
 import numpy as np
-from typing import List, Dict, Optional, Tuple
-from dataclasses import dataclass
 import torch
+from pydantic import BaseModel, Field, field_validator 
+
 
 logger = logging.getLogger(__name__)
 
-@dataclass
-class RerankerInputExample:
+
+class RerankerInputExample(BaseModel):
     """A single example for reranker training/evaluation."""
     guid: str
     query: str  # Natural language query
     code: str   # Code snippet
     label: int  # 1 for relevant, 0 for irrelevant
     query_id: Optional[int] = None  # Used for grouping codes by query during evaluation
+    
+    class Config:
+        arbitrary_types_allowed = True
 
-@dataclass
-class PointwiseFeature:
+
+class PointwiseFeature(BaseModel):
     """Features for pointwise reranking."""
     input_ids: List[int]
     attention_mask: List[int]
     token_type_ids: List[int]
     label: int
     query_id: Optional[int] = None
+    
+    class Config:
+        arbitrary_types_allowed = True
 
-@dataclass
-class PairwiseFeature:
+
+class PairwiseFeature(BaseModel):
     """Features for pairwise reranking."""
     pos_input_ids: List[int]
     pos_attention_mask: List[int]
@@ -40,27 +45,82 @@ class PairwiseFeature:
     neg_attention_mask: List[int]
     neg_token_type_ids: List[int]
     query_id: Optional[int] = None
+    
+    class Config:
+        arbitrary_types_allowed = True
+
+
+class ProcessorConfig(BaseModel):
+    """Configuration for data processor."""
+    data_dir: str = Field(..., description="Data directory path")
+    file_name: str = Field(..., description="File name for processing")
+    
+    @field_validator('data_dir')
+    def validate_data_dir(cls, v: str) -> str:
+        if not os.path.exists(v):
+            raise ValueError(f"Data directory '{v}' does not exist")
+        return v
+
 
 class RerankerProcessor:
     """Processor for code search reranking data."""
     
-    def get_train_examples(self, data_dir, file_name):
-        """Gets training examples."""
+    def get_train_examples(self, data_dir: str, file_name: str) -> List[RerankerInputExample]:
+        """
+        Gets training examples.
+        
+        Args:
+            data_dir: Directory containing the data files
+            file_name: Name of the training file
+            
+        Returns:
+            List of RerankerInputExample objects
+        """
+        config = ProcessorConfig(data_dir=data_dir, file_name=file_name)
         return self._create_examples(
-            self._read_tsv(os.path.join(data_dir, file_name)), "train")
+            self._read_tsv(os.path.join(config.data_dir, config.file_name)), "train")
     
-    def get_dev_examples(self, data_dir, file_name):
-        """Gets validation examples."""
+    def get_dev_examples(self, data_dir: str, file_name: str) -> List[RerankerInputExample]:
+        """
+        Gets validation examples.
+        
+        Args:
+            data_dir: Directory containing the data files
+            file_name: Name of the validation file
+            
+        Returns:
+            List of RerankerInputExample objects
+        """
+        config = ProcessorConfig(data_dir=data_dir, file_name=file_name)
         return self._create_examples(
-            self._read_tsv(os.path.join(data_dir, file_name)), "dev")
+            self._read_tsv(os.path.join(config.data_dir, config.file_name)), "dev")
     
-    def get_test_examples(self, data_dir, file_name):
-        """Gets test examples."""
+    def get_test_examples(self, data_dir: str, file_name: str) -> List[RerankerInputExample]:
+        """
+        Gets test examples.
+        
+        Args:
+            data_dir: Directory containing the data files
+            file_name: Name of the test file
+            
+        Returns:
+            List of RerankerInputExample objects
+        """
+        config = ProcessorConfig(data_dir=data_dir, file_name=file_name)
         return self._create_examples(
-            self._read_tsv(os.path.join(data_dir, file_name)), "test")
+            self._read_tsv(os.path.join(config.data_dir, config.file_name)), "test")
     
-    def _read_tsv(self, input_file, quotechar=None):
-        """Reads a tab-separated value file."""
+    def _read_tsv(self, input_file: str, quotechar: Optional[str] = None) -> List[List[str]]:
+        """
+        Reads a tab-separated value file.
+        
+        Args:
+            input_file: Path to the input file
+            quotechar: Character used for quoting
+            
+        Returns:
+            List of lines, each line is a list of fields
+        """
         with open(input_file, "r", encoding="utf-8") as f:
             lines = []
             for line in f.readlines():
@@ -70,8 +130,17 @@ class RerankerProcessor:
                 lines.append(line)
             return lines
     
-    def _create_examples(self, lines, set_type):
-        """Creates examples for training and evaluation."""
+    def _create_examples(self, lines: List[List[str]], set_type: str) -> List[RerankerInputExample]:
+        """
+        Creates examples for training and evaluation.
+        
+        Args:
+            lines: List of lines from the input file
+            set_type: Type of dataset (train, dev, test)
+            
+        Returns:
+            List of RerankerInputExample objects
+        """
         examples = []
         for (i, line) in enumerate(lines):
             guid = f"{set_type}-{i}"
@@ -102,7 +171,7 @@ def convert_examples_to_features(examples: List[RerankerInputExample],
                                 sep_token: str = "[SEP]",
                                 pad_token: int = 0,
                                 cls_token_segment_id: int = 0,
-                                pad_token_segment_id: int = 0):
+                                pad_token_segment_id: int = 0) -> List[Union[PointwiseFeature, PairwiseFeature]]:
     """
     Convert examples to features compatible with the model.
     

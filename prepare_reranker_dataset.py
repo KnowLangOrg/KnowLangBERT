@@ -1,16 +1,67 @@
+# -*- coding: utf-8 -*-
+# Script to prepare data for CodeBERT reranker fine-tuning
+
 import os
 import json
 import argparse
 import random
+from typing import Dict, List, Tuple, Set, Optional, Any
+
+from pydantic import BaseModel, Field, field_validator
 from tqdm import tqdm
 
-def format_str(string):
-    """Format string by replacing newlines with spaces."""
+
+class DataPrepConfig(BaseModel):
+    """Configuration for data preparation."""
+    input_file: str = Field(..., description="Input file in jsonl format")
+    output_file: str = Field(..., description="Output file in reranker format")
+    num_negatives: int = Field(5, description="Number of negative examples per positive example")
+    seed: int = Field(42, description="Random seed for reproducibility")
+    
+    @field_validator('input_file')
+    def validate_input_file(cls, v: str) -> str:
+        if not os.path.exists(v):
+            raise ValueError(f"Input file '{v}' does not exist")
+        return v
+    
+    @field_validator('output_file')
+    def validate_output_dir(cls, v: str) -> str:
+        output_dir = os.path.dirname(v)
+        if output_dir and not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+        return v
+
+
+class Example(BaseModel):
+    """An example for reranker training."""
+    label: int
+    query_id: int
+    url: str
+    query: str
+    code: str
+
+
+def format_str(string: str) -> str:
+    """
+    Format string by replacing newlines with spaces.
+    
+    Args:
+        string: Input string
+        
+    Returns:
+        Formatted string
+    """
     for char in ['\r\n', '\r', '\n']:
         string = string.replace(char, ' ')
     return string
 
-def prepare_reranker_data(input_file, output_file, num_negatives=5, seed=42):
+
+def prepare_reranker_data(
+    input_file: str, 
+    output_file: str, 
+    num_negatives: int = 5, 
+    seed: int = 42
+) -> None:
     """
     Prepare data for reranker fine-tuning from CodeSearchNet format.
     
@@ -20,16 +71,24 @@ def prepare_reranker_data(input_file, output_file, num_negatives=5, seed=42):
         num_negatives: Number of negative examples per positive example
         seed: Random seed for reproducibility
     """
-    random.seed(seed)
+    # Validate configuration
+    config = DataPrepConfig(
+        input_file=input_file,
+        output_file=output_file,
+        num_negatives=num_negatives,
+        seed=seed
+    )
+    
+    random.seed(config.seed)
     
     # Read input data
-    data = []
-    with open(input_file, 'r', encoding='utf-8') as f:
+    data: List[Dict[str, Any]] = []
+    with open(config.input_file, 'r', encoding='utf-8') as f:
         for line in f:
             data.append(json.loads(line))
     
     # Build a dictionary of query_id -> examples
-    query_dict = {}
+    query_dict: Dict[str, Dict[str, Any]] = {}
     for i, example in enumerate(data):
         query = ' '.join(example['docstring_tokens'])
         code = ' '.join([format_str(token) for token in example['code_tokens']])
@@ -46,30 +105,30 @@ def prepare_reranker_data(input_file, output_file, num_negatives=5, seed=42):
             query_dict[query]['all_indices'].append(i)
     
     # Create training examples
-    examples = []
+    examples: List[Example] = []
     
     for query, query_data in tqdm(query_dict.items(), desc="Preparing data"):
         query_id = query_data['query_id']
-        positive_examples = query_data['positive']
+        positive_examples: List[Tuple[int, str, str]] = query_data['positive']
         
         # Add positive examples (label=1)
         for idx, url, code in positive_examples:
-            examples.append({
-                'label': 1,
-                'query_id': query_id,
-                'url': url,
-                'query': query,
-                'code': code
-            })
+            examples.append(Example(
+                label=1,
+                query_id=query_id,
+                url=url,
+                query=query,
+                code=code
+            ))
         
         # Add negative examples (label=0)
         # Sample indices that are not positive for this query
-        all_indices = set(range(len(data)))
-        positive_indices = set([idx for idx, _, _ in positive_examples])
+        all_indices: Set[int] = set(range(len(data)))
+        positive_indices: Set[int] = set([idx for idx, _, _ in positive_examples])
         negative_candidates = list(all_indices - positive_indices)
         
         # Sample negative examples
-        num_neg = min(num_negatives * len(positive_examples), len(negative_candidates))
+        num_neg = min(config.num_negatives * len(positive_examples), len(negative_candidates))
         negative_indices = random.sample(negative_candidates, num_neg)
         
         for idx in negative_indices:
@@ -77,19 +136,19 @@ def prepare_reranker_data(input_file, output_file, num_negatives=5, seed=42):
             neg_code = ' '.join([format_str(token) for token in example['code_tokens']])
             neg_url = example['url']
             
-            examples.append({
-                'label': 0,
-                'query_id': query_id,
-                'url': neg_url,
-                'query': query,
-                'code': neg_code
-            })
+            examples.append(Example(
+                label=0,
+                query_id=query_id,
+                url=neg_url,
+                query=query,
+                code=neg_code
+            ))
     
     # Write examples to output file
-    with open(output_file, 'w', encoding='utf-8') as f:
+    with open(config.output_file, 'w', encoding='utf-8') as f:
         for example in examples:
-            line = f"{example['label']}<CODESPLIT>{example['query_id']}<CODESPLIT>{example['url']}" \
-                   f"<CODESPLIT>{example['query']}<CODESPLIT>{example['code']}\n"
+            line = f"{example.label}<CODESPLIT>{example.query_id}<CODESPLIT>{example.url}" \
+                   f"<CODESPLIT>{example.query}<CODESPLIT>{example.code}\n"
             f.write(line)
     
     print(f"Created {len(examples)} examples with {len(query_dict)} unique queries")
