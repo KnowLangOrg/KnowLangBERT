@@ -11,6 +11,8 @@ from tensorboardX import SummaryWriter
 from tqdm import tqdm, trange
 from transformers import (WEIGHTS_NAME, AdamW, get_linear_schedule_with_warmup,
                          RobertaConfig, RobertaTokenizer)
+from pydantic import BaseModel, Field
+from typing import Optional, Literal
 
 from model import CodeBERTReranker, RerankerType
 from utils import (
@@ -24,14 +26,59 @@ from utils import (
 
 logger = logging.getLogger(__name__)
 
-def set_seed(args):
+class RerankerArgs(BaseModel):
+    # Required parameters
+    data_dir: str = Field(..., description="The input data directory")
+    model_type: str = Field(..., description="Model type: roberta")
+    model_name_or_path: str = Field(..., description="Path to pre-trained model or shortcut name")
+    output_dir: str = Field(..., description="The output directory for model predictions and checkpoints")
+    reranker_type: Literal["pointwise", "pairwise"] = Field(..., description="Reranker type: pointwise or pairwise")
+
+    # Data parameters
+    train_file: str = Field("train.txt", description="The training data file name")
+    dev_file: str = Field("dev.txt", description="The development data file name")
+    max_seq_length: int = Field(256, description="The maximum total input sequence length after tokenization")
+    
+    # Training parameters
+    do_train: bool = Field(False, description="Whether to run training")
+    do_eval: bool = Field(False, description="Whether to run evaluation on the dev set")
+    evaluate_during_training: bool = Field(False, description="Run evaluation during training at each logging step")
+    per_gpu_train_batch_size: int = Field(8, description="Batch size per GPU/CPU for training")
+    per_gpu_eval_batch_size: int = Field(8, description="Batch size per GPU/CPU for evaluation")
+    learning_rate: float = Field(5e-5, description="The initial learning rate for Adam")
+    weight_decay: float = Field(0.0, description="Weight decay if we apply some")
+    adam_epsilon: float = Field(1e-8, description="Epsilon for Adam optimizer")
+    max_grad_norm: float = Field(1.0, description="Max gradient norm")
+    num_train_epochs: float = Field(3.0, description="Total number of training epochs to perform")
+    max_steps: int = Field(-1, description="If > 0: set total number of training steps to perform. Override num_train_epochs")
+    warmup_steps: int = Field(0, description="Linear warmup over warmup_steps")
+    margin: float = Field(0.3, description="Margin for pairwise ranking loss")
+    
+    # Logging and saving parameters
+    logging_steps: int = Field(50, description="Log every X updates steps")
+    save_steps: int = Field(50, description="Save checkpoint every X updates steps")
+    
+    # System parameters
+    no_cuda: bool = Field(False, description="Avoid using CUDA when available")
+    seed: int = Field(42, description="Random seed for initialization")
+    local_rank: int = Field(-1, description="For distributed training: local_rank")
+    fp16: bool = Field(False, description="Whether to use 16-bit (mixed) precision")
+    gradient_accumulation_steps: int = Field(1, description="Number of updates steps to accumulate before performing update")
+    
+    # Derived fields (not directly from CLI args)
+    device: Optional[torch.device] = None
+    n_gpu: int = 0
+    train_batch_size: Optional[int] = None
+    eval_batch_size: Optional[int] = None
+
+def set_seed(args: RerankerArgs):
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     if args.n_gpu > 0:
         torch.cuda.manual_seed_all(args.seed)
 
-def train(args, train_dataset, model, tokenizer):
+def train(args: RerankerArgs, train_dataset, model, tokenizer):
     """ Train the model """
     if args.local_rank in [-1, 0]:
         tb_writer = SummaryWriter()
@@ -158,7 +205,7 @@ def train(args, train_dataset, model, tokenizer):
                     
                     # Save tokenizer and training args
                     tokenizer.save_pretrained(output_dir)
-                    torch.save(args, os.path.join(output_dir, 'training_args.bin'))
+                    torch.save(args.model_dump(), os.path.join(output_dir, 'training_args.bin'))
                     logger.info("Saving model checkpoint to %s", output_dir)
                     
                     # Save optimizer and scheduler
@@ -192,7 +239,7 @@ def train(args, train_dataset, model, tokenizer):
                 
                 # Save tokenizer and training args
                 tokenizer.save_pretrained(output_dir)
-                torch.save(args, os.path.join(output_dir, 'training_args.bin'))
+                torch.save(args.model_dump(), os.path.join(output_dir, 'training_args.bin'))
                 logger.info("Saving best model checkpoint with MRR: %s to %s", best_mrr, output_dir)
                 
         if args.max_steps > 0 and global_step > args.max_steps:
@@ -205,7 +252,7 @@ def train(args, train_dataset, model, tokenizer):
     return global_step, tr_loss / global_step
 
 
-def evaluate(args, model, tokenizer, prefix=""):
+def evaluate(args: RerankerArgs, model, tokenizer, prefix=""):
     """Evaluate the model on the dev/test set"""
     eval_output_dir = args.output_dir
     
@@ -294,7 +341,7 @@ def evaluate(args, model, tokenizer, prefix=""):
     return results
 
 
-def load_and_cache_examples(args, tokenizer, evaluate=False):
+def load_and_cache_examples(args: RerankerArgs, tokenizer, evaluate=False):
     """Load and preprocess the reranking dataset"""
     # Create processor
     processor = RerankerProcessor()
@@ -425,7 +472,11 @@ def main():
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1,
                         help="Number of updates steps to accumulate before performing a backward/update pass")
     
-    args = parser.parse_args()
+    parsed_args = parser.parse_args()
+    
+    # Convert parsed args to Pydantic model and validate
+    args_dict = vars(parsed_args)
+    args = RerankerArgs.model_validate(args_dict)
 
     # Setup CUDA, GPU & distributed training
     if args.local_rank == -1 or args.no_cuda:
@@ -503,7 +554,7 @@ def main():
                 torch.save(model_to_save.state_dict(), os.path.join(args.output_dir, "pytorch_model.bin"))
             
             tokenizer.save_pretrained(args.output_dir)
-            torch.save(args, os.path.join(args.output_dir, "training_args.bin"))
+            torch.save(args.model_dump(), os.path.join(args.output_dir, "training_args.bin"))
 
     # Evaluation
     results = {}
