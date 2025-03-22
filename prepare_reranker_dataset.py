@@ -1,11 +1,9 @@
-# -*- coding: utf-8 -*-
-# Script to prepare data for CodeBERT reranker fine-tuning
-
 import os
 import json
+import gzip
 import argparse
 import random
-from typing import Dict, List, Tuple, Set, Optional, Any
+from typing import Dict, List, Tuple, Set, Any
 
 from pydantic import BaseModel, Field, field_validator
 from tqdm import tqdm
@@ -13,7 +11,7 @@ from tqdm import tqdm
 
 class DataPrepConfig(BaseModel):
     """Configuration for data preparation."""
-    input_file: str = Field(..., description="Input file in jsonl format")
+    input_file: str = Field(..., description="Input file in jsonl or jsonl.gz format")
     output_file: str = Field(..., description="Output file in reranker format")
     num_negatives: int = Field(5, description="Number of negative examples per positive example")
     seed: int = Field(42, description="Random seed for reproducibility")
@@ -56,6 +54,32 @@ def format_str(string: str) -> str:
     return string
 
 
+def read_jsonl_data(file_path: str) -> List[Dict[str, Any]]:
+    """
+    Read data from a JSONL file, which may be gzipped.
+    
+    Args:
+        file_path: Path to the input file
+        
+    Returns:
+        List of dictionaries containing the data
+    """
+    data = []
+    
+    # Check if the file is gzipped
+    is_gzipped = file_path.endswith('.gz')
+    
+    # Read directly from gzipped or normal file
+    open_func = gzip.open if is_gzipped else open
+    mode = 'rt' if is_gzipped else 'r'
+    
+    with open_func(file_path, mode, encoding='utf-8') as f:
+        for line in f:
+            data.append(json.loads(line))
+    
+    return data
+
+
 def prepare_reranker_data(
     input_file: str, 
     output_file: str, 
@@ -66,7 +90,7 @@ def prepare_reranker_data(
     Prepare data for reranker fine-tuning from CodeSearchNet format.
     
     Args:
-        input_file: Input file in jsonl format
+        input_file: Input file in jsonl or jsonl.gz format
         output_file: Output file in our reranker format
         num_negatives: Number of negative examples per positive example
         seed: Random seed for reproducibility
@@ -82,10 +106,7 @@ def prepare_reranker_data(
     random.seed(config.seed)
     
     # Read input data
-    data: List[Dict[str, Any]] = []
-    with open(config.input_file, 'r', encoding='utf-8') as f:
-        for line in f:
-            data.append(json.loads(line))
+    data = read_jsonl_data(config.input_file)
     
     # Build a dictionary of query_id -> examples
     query_dict: Dict[str, Dict[str, Any]] = {}
@@ -155,7 +176,7 @@ def prepare_reranker_data(
 
 def main():
     parser = argparse.ArgumentParser(description="Prepare data for CodeBERT reranker fine-tuning")
-    parser.add_argument("--input_file", required=True, help="Input file in jsonl format")
+    parser.add_argument("--input_file", required=True, help="Input file in jsonl or jsonl.gz format")
     parser.add_argument("--output_file", required=True, help="Output file in reranker format")
     parser.add_argument("--num_negatives", type=int, default=5, 
                        help="Number of negative examples per positive example")
@@ -167,7 +188,12 @@ def main():
     os.makedirs(os.path.dirname(args.output_file), exist_ok=True)
     
     # Prepare data
-    prepare_reranker_data(args.input_file, args.output_file, args.num_negatives, args.seed)
+    prepare_reranker_data(
+        args.input_file, 
+        args.output_file, 
+        args.num_negatives, 
+        args.seed,
+    )
 
 if __name__ == "__main__":
     main()
