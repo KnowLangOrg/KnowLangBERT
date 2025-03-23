@@ -349,6 +349,7 @@ def evaluate(args: RerankerArgs, model: CodeBERTReranker,
 
             # Get scores
             scores = model.get_score(**inputs).detach().cpu().numpy()
+            scores = scores.squeeze(-1) # Remove extra dimension
 
             # Get labels
             labels = batch[3].detach().cpu().numpy()

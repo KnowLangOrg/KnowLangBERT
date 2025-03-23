@@ -173,7 +173,7 @@ class RerankerProcessor:
                 )
         return examples
 
-def compute_reranker_metrics(scores: np.ndarray, labels: np.ndarray, query_ids: np.ndarray = None) -> Dict[str, float]:
+def compute_reranker_metrics(scores: np.ndarray, labels: np.ndarray, query_ids: np.ndarray) -> Dict[str, float]:
     """
     Compute evaluation metrics for reranking.
     
@@ -185,10 +185,14 @@ def compute_reranker_metrics(scores: np.ndarray, labels: np.ndarray, query_ids: 
     Returns:
         Dictionary of metrics
     """
+    assert scores.shape == labels.shape == query_ids.shape  # Ensure correct shapes
+    assert len(scores.shape) == 1  # Ensure 1D arrays
+
+
     metrics = {}
     
     # Compute classification metrics
-    pred_labels = (scores > 0.5).astype(int) if scores.ndim == 1 else np.argmax(scores, axis=1)
+    pred_labels = (scores > 0.5).astype(int)
     accuracy = (pred_labels == labels).mean()
     metrics["accuracy"] = float(accuracy)
     
@@ -231,7 +235,7 @@ def compute_reranker_metrics(scores: np.ndarray, labels: np.ndarray, query_ids: 
             dcg = np.sum(sorted_labels[:k] / np.log2(np.arange(2, k+2)))
             
             # Calculate ideal DCG (sort by relevance)
-            ideal_labels = np.sort(query_labels)[::-1]  # Sort in descending order
+            ideal_labels = np.sort(query_labels)[::-1]  # Sort in ascending order first and then reverse it
             idcg = np.sum(ideal_labels[:k] / np.log2(np.arange(2, k+2)))
             
             if idcg > 0:
