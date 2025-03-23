@@ -81,6 +81,8 @@ class CodeBERTReranker(nn.Module):
                         classifier_key = key[len('classifier.'):]
                     classifier_weights[classifier_key] = value
                 else:
+                    if key.startswith('model.'):
+                        key = key[len('model.'):]
                     model_weights[key] = value
             
             # Load base model weights
