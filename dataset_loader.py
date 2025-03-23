@@ -11,7 +11,8 @@ from utils import (
     RerankerInputExample,
     RerankerProcessor,
     PointwiseFeature,
-    PairwiseFeature
+    PairwiseFeature,
+    get_device
 )
 
 logger = logging.getLogger(__name__)
@@ -70,7 +71,7 @@ class DynamicPairDataset(Dataset):
     def __init__(self, examples: List[RerankerInputExample], 
                  tokenizer: Any, 
                  max_seq_length: int,
-                 device: str,
+                 device: str = get_device(),
                  seed: int = 42):
         """
         Initialize dynamic pair dataset.
@@ -214,7 +215,7 @@ class PointwiseDataset(Dataset):
     def __init__(self, examples: List[RerankerInputExample], 
                  tokenizer: Any, 
                  max_seq_length: int,
-                 device: str):
+                 device: str = get_device()):
         """
         Initialize pointwise dataset.
         
@@ -356,7 +357,7 @@ def load_examples(config: DatasetLoaderConfig, max_files: int = 6) -> List[Reran
     return examples
 
 
-def load_datasets(config: DatasetLoaderConfig) -> Union[Dataset, ConcatDataset]:
+def load_datasets(config: DatasetLoaderConfig, device : str = get_device()) -> Union[Dataset, ConcatDataset]:
     """
     Load and process all data files for the given configuration.
     
@@ -369,12 +370,6 @@ def load_datasets(config: DatasetLoaderConfig) -> Union[Dataset, ConcatDataset]:
     # Load examples from files
     examples = load_examples(config)
 
-    device = 'cpu'
-    if torch.cuda.is_available():
-        device = 'cuda'
-    elif torch.mps.is_available():
-        device = 'mps'
-    
     # Create dataset based on reranker type
     if config.reranker_type == "pointwise":
         return PointwiseDataset(examples, config.tokenizer, config.max_seq_length, device)

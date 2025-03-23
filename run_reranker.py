@@ -560,23 +560,6 @@ def main():
             tokenizer.save_pretrained(args.output_dir)
             torch.save(args.model_dump(), os.path.join(args.output_dir, "training_args.bin"))
 
-    # Evaluation
-    results = {}
-    if args.do_eval and args.local_rank in [-1, 0]:
-        # Load a trained model and evaluate
-        logger.info(f"Evaluate the following checkpoint: {args.output_dir}")
-        
-        model = CodeBERTReranker(
-            args.output_dir,
-            reranker_type=args.reranker_type,
-            margin=args.margin
-        )
-        model.to(args.device)
-        
-        result = evaluate(args, model, tokenizer, prefix="final")
-        results.update(result)
-
-    return results
 
 
 if __name__ == "__main__":

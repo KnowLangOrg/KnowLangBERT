@@ -1,8 +1,7 @@
-import csv
 import logging
 import os
 from io import open
-from typing import List, Dict, Optional, Tuple, Any, Union, Sequence
+from typing import List, Dict, Optional
 
 import numpy as np
 import torch
@@ -10,6 +9,17 @@ from pydantic import BaseModel, Field, field_validator
 
 
 logger = logging.getLogger(__name__)
+
+def get_device() -> str:
+    """Get the current device (GPU or CPU)."""
+    device = "cpu"
+
+    if torch.cuda.is_available():
+        device = "cuda"
+    elif torch.mps.is_available():
+        device = "mps"
+
+    return device
 
 
 class RerankerInputExample(BaseModel):

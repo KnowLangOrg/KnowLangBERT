@@ -1,12 +1,12 @@
 from enum import Enum
-from typing import Dict, Optional, Tuple, Union, Any, List
-
+from typing import Dict, Optional, Union
 import torch
 import torch.nn as nn
 from pydantic import BaseModel, Field
 from transformers import RobertaConfig, RobertaModel, RobertaForSequenceClassification
 from transformers.modeling_outputs import SequenceClassifierOutput
 
+from utils import get_device
 
 class RerankerType(str, Enum):
     """Enum for reranker types."""
@@ -30,6 +30,76 @@ class CodeBERTReranker(nn.Module):
     This model takes a query and code candidate as input and outputs a relevance score.
     For fine-tuning, it can be trained with pointwise or pairwise ranking approaches.
     """
+
+    @classmethod
+    def from_pretrained(cls, 
+        model_path: str, 
+        config: Optional[RobertaConfig] = None, 
+        margin: float = 0.3, 
+        reranker_type: Union[str, RerankerType] = RerankerType.PAIRWISE,
+        device: Optional[str] = get_device()
+    ):
+        """
+        Create a CodeBERTReranker instance from a pretrained state dictionary
+        
+        Args:
+            model_path: Path to the saved model state dict
+            config: Optional RobertaConfig object
+            margin: Margin for pairwise ranking loss
+            reranker_type: 'pointwise' or 'pairwise' reranking approach
+            device: Device to load the model on (defaults to CPU if None)
+            
+        Returns:
+            Initialized CodeBERTReranker with loaded weights
+        """
+        # Create a dummy model name that won't be used for loading weights
+        placeholder_model_name = 'microsoft/codebert-base'
+        
+        # Initialize the model structure
+        model = cls(
+            model_name_or_path=placeholder_model_name,
+            config=config,
+            margin=margin,
+            reranker_type=reranker_type
+        )
+        
+        # Load state dict
+        state_dict = torch.load(model_path)
+        
+        
+        # Handle loading based on reranker type
+        if model.reranker_type == RerankerType.PAIRWISE:
+            # Extract classifier weights from state dict
+            classifier_weights = {}
+            model_weights = {}
+            
+            for key, value in state_dict.items():
+                if key.startswith('classifier'):
+                    # Remove the 'classifier.' prefix for the classifier layers
+                    classifier_key = key
+                    if key.startswith('classifier.'):
+                        classifier_key = key[len('classifier.'):]
+                    classifier_weights[classifier_key] = value
+                else:
+                    model_weights[key] = value
+            
+            # Load base model weights
+            model.model.load_state_dict(model_weights)
+            
+            # Load classifier weights if they exist
+            if classifier_weights:
+                model.classifier.load_state_dict(classifier_weights)
+        elif model.reranker_type == RerankerType.POINTWISE:
+            # The model is already a RobertaForSequenceClassification
+            model.model.load_state_dict(state_dict)
+        else:
+            raise ValueError(f"Invalid reranker type: {model.reranker_type}")
+        
+        # Set model to eval mode by default
+        model.eval()
+        model.to(device)
+        
+        return model
     
     def __init__(self, 
                  model_name_or_path: str = 'microsoft/codebert-base', 
