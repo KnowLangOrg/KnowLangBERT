@@ -14,7 +14,7 @@
                 "--data_dir", "./output/reranker_dataset",
                 "--language", "python",
                 "--model_type", "roberta",
-                "--model_name_or_path", "output/reranker_models/python/checkpoint-3000/pytorch_model.bin",
+                "--model_name_or_path", "microsoft/codebert-base",
                 "--output_dir", "./output/reranker_models/python",
                 "--reranker_type", "pairwise",
                 "--max_seq_length", "256",
