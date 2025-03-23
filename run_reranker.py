@@ -146,13 +146,6 @@ def train(args: RerankerArgs, train_dataset: Union[TensorDataset, ConcatDataset]
                                                           find_unused_parameters=True)
     
 
-    # Before Training: Evaluate model
-    results = evaluate(args, model, tokenizer, prefix=f"before-training")
-    logger.info("***** Before Training *****")
-    for key, value in results.items():
-        logger.info(f"Eval {key}: {value}")
-    
-
     # Train!
     logger.info("***** Running training *****")
     logger.info("  Num examples = %d", len(train_dataset))
@@ -267,6 +260,8 @@ def train(args: RerankerArgs, train_dataset: Union[TensorDataset, ConcatDataset]
                 
                 # Save model
                 model_to_save = model.module if hasattr(model, 'module') else model
+                model_to_save.config.to_json_file(os.path.join(args.output_dir, "config.json"))
+
                 if hasattr(model_to_save, 'save_pretrained'):
                     model_to_save.save_pretrained(output_dir)
                 else:
@@ -552,6 +547,8 @@ def main():
         if args.local_rank == -1 or torch.distributed.get_rank() == 0:
             logger.info(f"Saving model checkpoint to {args.output_dir}")
             model_to_save = model.module if hasattr(model, "module") else model
+            model_to_save.config.to_json_file(os.path.join(args.output_dir, "config.json"))
+
             if hasattr(model_to_save, 'save_pretrained'):
                 model_to_save.save_pretrained(args.output_dir)
             else:
