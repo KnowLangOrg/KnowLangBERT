@@ -1,0 +1,52 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Training",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/run_reranker.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--data_dir", "./output/reranker_dataset",
+                "--language", "python",
+                "--model_type", "roberta",
+                "--model_name_or_path", "microsoft/codebert-base",
+                "--output_dir", "./output/reranker_models/python",
+                "--reranker_type", "pairwise",
+                "--max_seq_length", "256",
+                "--cache_dir", "./output/cache",
+                "--num_workers", "8",
+                "--per_gpu_train_batch_size", "32",
+                "--per_gpu_eval_batch_size", "128",
+                "--learning_rate", "2e-5",
+                "--num_train_epochs", "5",
+                "--warmup_steps", "1000",
+                "--logging_steps", "100",
+                "--save_steps", "3000",
+                "--seed", "42",
+                "--do_train",
+                "--do_eval",
+                "--evaluate_during_training"
+            ]
+        },
+        {
+            "name": "Prepare Dataset",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/prepare_reranker_dataset.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--input_dir", "./dataset",
+                "--output_dir", "./output/reranker_dataset",
+                "--language", "python",
+                "--num_negatives", "5",
+                "--num_workers", "8",
+                "--dataset_types", "train", "valid", "test"
+            ]
+        }
+    ]
+}
