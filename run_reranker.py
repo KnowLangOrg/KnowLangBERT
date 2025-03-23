@@ -144,6 +144,14 @@ def train(args: RerankerArgs, train_dataset: Union[TensorDataset, ConcatDataset]
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.local_rank],
                                                           output_device=args.local_rank,
                                                           find_unused_parameters=True)
+    
+
+    # Before Training: Evaluate model
+    results = evaluate(args, model, tokenizer, prefix=f"before-training")
+    logger.info("***** Before Training *****")
+    for key, value in results.items():
+        logger.info(f"Eval {key}: {value}")
+    
 
     # Train!
     logger.info("***** Running training *****")
@@ -283,28 +291,29 @@ def evaluate(args: RerankerArgs, model: CodeBERTReranker,
              tokenizer: RobertaTokenizer, prefix: str = "") -> Dict[str, float]:
     """
     Evaluate the model on the validation/test set.
-    
+
     Args:
         args: Training arguments
         model: Model to evaluate
         tokenizer: Tokenizer
         prefix: String prefix for logging
-        
+
     Returns:
         Dictionary of evaluation metrics
     """
     eval_output_dir = args.output_dir
     
     results = {}
-    
-    # Load evaluation dataset
+
+    # During evaluation, we always use pointwise format
+    # Load evaluation dataset in pointwise format, regardless of training reranker_type
     eval_config = DatasetLoaderConfig(
         data_dir=args.data_dir,
         language=args.language,
         dataset_type="valid",  # Always use 'valid' for evaluation
         max_seq_length=args.max_seq_length,
         tokenizer=tokenizer,
-        reranker_type=args.reranker_type,
+        reranker_type="pointwise",  # Force pointwise for evaluation
         cache_dir=args.cache_dir,
         num_workers=args.num_workers
     )
@@ -321,55 +330,39 @@ def evaluate(args: RerankerArgs, model: CodeBERTReranker,
     logger.info(f"***** Running evaluation {prefix} *****")
     logger.info(f"  Num examples = {len(eval_dataset)}")
     logger.info(f"  Batch size = {args.eval_batch_size}")
-    
+
     all_scores = []
     all_labels = []
     all_query_ids = []
-    
+
     for batch in tqdm(eval_dataloader, desc="Evaluating"):
         model.eval()
         batch = tuple(t.to(args.device) for t in batch)
 
         with torch.no_grad():
-            if args.reranker_type == "pointwise":
-                inputs = {'input_ids': batch[0],
-                          'attention_mask': batch[1],
-                          'token_type_ids': batch[2] if args.model_type in ['bert', 'xlnet'] else None}
-                
-                # Get scores
-                outputs = model.get_score(**inputs)
-                scores = outputs.detach().cpu().numpy()
-                
-                # Get labels
-                labels = batch[3].detach().cpu().numpy()
-                
-                # Get query IDs (if available)
-                if len(batch) > 4:
-                    query_ids = batch[4].detach().cpu().numpy()
-                else:
-                    query_ids = np.zeros_like(labels)
-                
-            else:  # For pairwise, during evaluation we still use pointwise scoring
-                inputs = {'input_ids': batch[0],
-                          'attention_mask': batch[1],
-                          'token_type_ids': batch[2] if args.model_type in ['bert', 'xlnet'] else None}
-                
-                # Get scores
-                scores = model.get_score(**inputs).detach().cpu().numpy()
-                
-                # Get labels
-                labels = batch[3].detach().cpu().numpy()
-                
-                # Get query IDs (if available)
-                if len(batch) > 4:
-                    query_ids = batch[4].detach().cpu().numpy()
-                else:
-                    query_ids = np.zeros_like(labels)
-            
+            # Process batch as pointwise data
+            inputs = {
+                'input_ids': batch[0],
+                'attention_mask': batch[1],
+                'token_type_ids': batch[2] if args.model_type in ['bert', 'xlnet'] else None
+            }
+
+            # Get scores
+            scores = model.get_score(**inputs).detach().cpu().numpy()
+
+            # Get labels
+            labels = batch[3].detach().cpu().numpy()
+
+            # Get query IDs (if available)
+            if len(batch) > 4:
+                query_ids = batch[4].detach().cpu().numpy()
+            else:
+                query_ids = np.zeros_like(labels)
+
             all_scores.append(scores)
             all_labels.append(labels)
             all_query_ids.append(query_ids)
-    
+
     # Concatenate results
     all_scores = np.concatenate(all_scores, axis=0)
     all_labels = np.concatenate(all_labels, axis=0)
@@ -390,7 +383,7 @@ def evaluate(args: RerankerArgs, model: CodeBERTReranker,
             writer.write(f"{key} = {str(results[key])}\n")
 
     return results
-
+    
 
 def main():
     """Main execution function."""

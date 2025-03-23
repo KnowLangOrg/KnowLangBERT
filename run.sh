@@ -9,8 +9,9 @@ MODEL_NAME="microsoft/codebert-base"           # Base model to finetune
 NUM_NEGATIVES=5                                # Number of negative examples per positive
 NUM_WORKERS=8                                  # Number of worker threads for data preparation
 BATCH_SIZE=32                                  # Training batch size
+EVAL_BATCH_SIZE=128                           # Evaluation batch size
 LEARNING_RATE=2e-5                             # Learning rate
-NUM_EPOCHS=1                                  # Number of training epochs
+NUM_EPOCHS=5                                 # Number of training epochs
 RERANKER_TYPE="pairwise"                       # Reranker type (pointwise or pairwise)
 
 # Create directories
@@ -54,16 +55,16 @@ train_model() {
       --cache_dir "${CACHE_DIR}" \
       --num_workers "${NUM_WORKERS}" \
       --per_gpu_train_batch_size "${BATCH_SIZE}" \
-      --per_gpu_eval_batch_size "${BATCH_SIZE}" \
+      --per_gpu_eval_batch_size "${EVAL_BATCH_SIZE}" \
       --learning_rate "${LEARNING_RATE}" \
       --num_train_epochs "${NUM_EPOCHS}" \
       --warmup_steps 1000 \
       --logging_steps 100 \
-      --save_steps 1000 \
+      --save_steps 3000 \
       --seed 42 \
       --do_train \
       --do_eval \
-      --evaluate_during_training
+      --evaluate_during_training 2>&1| tee $RERANKER_DATA_DIR/$lang/train.log
 
     echo "============================================"
     echo "Training completed!"
