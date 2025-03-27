@@ -1,7 +1,8 @@
+import json
 import logging
 import os
 from io import open
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Union
 
 import numpy as np
 import torch
@@ -139,28 +140,57 @@ class RerankerProcessor:
                     continue
                 lines.append(line)
             return lines
+        
+    def _read_jsonl(self, input_file: str) -> List[Dict]:
+        """
+        Reads a JSON Lines file.
+        
+        Args:
+            input_file: Path to the input file
+            
+        Returns:
+            List of dictionaries, each representing a JSON object
+        """
+        examples = []
+        with open(input_file, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                examples.append(json.loads(line))
+        return examples
     
-    def _create_examples(self, lines: List[List[str]], set_type: str) -> List[RerankerInputExample]:
+    def _create_examples(self, data: Union[List[List[str]], List[Dict]], set_type: str, is_jsonl: bool = True) -> List[RerankerInputExample]:
         """
         Creates examples for training and evaluation.
         
         Args:
-            lines: List of lines from the input file
+            data: Either a list of lines from TSV file or a list of dictionaries from JSONL file
             set_type: Type of dataset (train, dev, test)
+            is_jsonl: Whether the data is in JSONL format
             
         Returns:
             List of RerankerInputExample objects
         """
         examples = []
-        for (i, line) in enumerate(lines):
-            guid = f"{set_type}-{i}"
-            
-            # Parse line based on the expected format
-            if len(line) >= 5:
-                label = int(line[0])
-                query_id = int(line[1]) if line[1].isdigit() else i
-                query = line[3]
-                code = line[4]
+        
+        if is_jsonl:
+            # Process JSONL format
+            for i, item in enumerate(data):
+                guid = f"{set_type}-{i}"
+                
+                # Extract fields from the JSON object
+                label = int(item.get("label", 0))
+                query_id = item.get("query_id")
+                if query_id.split('_')[-1].isdigit(): # ex. "python_train_123"
+                    query_id = int(query_id.split('_')[-1])
+                elif query_id.isdigit():
+                    query_id = int(query_id)
+                else:
+                    query_id = i
+
+                query = item.get("query", "")
+                code = item.get("code", "")
                 
                 examples.append(
                     RerankerInputExample(
@@ -171,6 +201,28 @@ class RerankerProcessor:
                         query_id=query_id
                     )
                 )
+        else:
+            # Process TSV format (original implementation)
+            for (i, line) in enumerate(data):
+                guid = f"{set_type}-{i}"
+                
+                # Parse line based on the expected format
+                if len(line) >= 5:
+                    label = int(line[0])
+                    query_id = int(line[1]) if line[1].isdigit() else i
+                    query = line[3]
+                    code = line[4]
+                    
+                    examples.append(
+                        RerankerInputExample(
+                            guid=guid,
+                            query=query,
+                            code=code,
+                            label=label,
+                            query_id=query_id
+                        )
+                    )
+        
         return examples
 
 def compute_reranker_metrics(scores: np.ndarray, labels: np.ndarray, query_ids: np.ndarray) -> Dict[str, float]:

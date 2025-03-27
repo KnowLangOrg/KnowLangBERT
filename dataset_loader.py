@@ -299,7 +299,7 @@ def get_dataset_files(config: DatasetLoaderConfig) -> List[Path]:
     Returns:
         List of dataset file paths
     """
-    pattern = f"{config.language}_{config.dataset_type}_*.txt"
+    pattern = f"{config.language}_{config.dataset_type}_*.*"
     files = list(config.dataset_path.glob(pattern))
     
     # Sort files numerically by the index number
@@ -347,11 +347,21 @@ def load_examples(config: DatasetLoaderConfig, max_files: int = 6) -> List[Reran
     
     # Load examples from files
     examples = []
+    
     for file_path in tqdm(files, desc=f"Loading {config.dataset_type} examples"):
-        examples.extend(processor._create_examples(
-            processor._read_tsv(str(file_path)), 
-            set_type=config.dataset_type
-        ))
+        is_jsonl = file_path.suffix.lower() == '.jsonl'
+        
+        if is_jsonl:
+            examples.extend(processor._create_examples(
+                processor._read_jsonl(str(file_path)), 
+                set_type=config.dataset_type,
+                is_jsonl=True
+            ))
+        else:
+            examples.extend(processor._create_examples(
+                processor._read_tsv(str(file_path)), 
+                set_type=config.dataset_type
+            ))
     
     logger.info(f"Loaded {len(examples)} examples from {len(files)} files")
     return examples
